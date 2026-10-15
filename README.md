@@ -26,6 +26,9 @@ parties verify the mint's signature against its published public key,
 check expiry and the revocation list, and can demand a fresh
 possession proof (sign a challenge with the certified key).
 
+REST surface: [API.md](API.md) — every route, grouped by plane, with
+the trust model for each.
+
 Design document: [SPEC.md](SPEC.md) — the full spec, including the
 refresh rules (30-day sliding window, 12-month absolute cap from the
 last human authentication), revocation, provider policy notes, and
