@@ -1,0 +1,12 @@
+# deployment config and secrets — never commit
+*.env
+.tokens
+*.pem
+*.key
+
+# runtime state and issued material
+state.json
+session.json
+cert.txt
+__pycache__/
+*.log
