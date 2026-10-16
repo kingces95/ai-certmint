@@ -8,14 +8,21 @@ Usage:
   cm-client.py refresh           # refresh the held cert (possession proof)
   cm-client.py verify [file]     # verify a cert's mint signature + fingerprint
   cm-client.py show              # print the held cert
+  cm-client.py guid-new          # birth a GUID, authorized by the held identity cert
+  cm-client.py guid-renew [cert] [key]
+                                 # mint a peer of a held guid cert (same key)
+  cm-client.py guid-add <key>    # bind the GUID to another key you hold
+  cm-client.py guid-show         # print the GUID and its peer certs
 """
-import base64, hashlib, json, os, struct, subprocess, sys, time, urllib.request
+import base64, hashlib, json, os, struct, subprocess, sys, time, urllib.parse, urllib.request
 
 BASE = 'https://certmint.ai'
 DIR = os.path.expanduser('~/.certmint')
 KEY_PEM = os.path.join(DIR, 'id_ed25519.pem')
 SESSION_FILE = os.path.join(DIR, 'session.json')
 CERT_FILE = os.path.join(DIR, 'cert.txt')
+GUID_FILE = os.path.join(DIR, 'guid.txt')
+GUID_DIR = os.path.join(DIR, 'guid-certs')
 MINT_PUB_FILE = os.path.join(DIR, 'mint-pubkey.json')
 SPKI_PREFIX = bytes.fromhex('302a300506032b6570032100')
 
@@ -25,13 +32,23 @@ def sh(*args, inp=None):
         raise RuntimeError(f"{args[0]} failed: {r.stderr.decode()[:200]}")
     return r.stdout
 
-def my_pubkey():
-    der = sh('openssl', 'pkey', '-in', KEY_PEM, '-pubout', '-outform', 'DER')
+def pubkey_of(pem):
+    der = sh('openssl', 'pkey', '-in', pem, '-pubout', '-outform', 'DER')
     raw = der[-32:]
     blob = struct.pack('>I', 11) + b'ssh-ed25519' + struct.pack('>I', 32) + raw
     line = 'ssh-ed25519 ' + base64.b64encode(blob).decode()
     fp = 'SHA256:' + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip('=')
     return line, fp, raw
+
+def my_pubkey():
+    return pubkey_of(KEY_PEM)
+
+def sign_with(pem, msg_bytes):
+    msg_f = os.path.join(DIR, '.smsg')
+    open(msg_f, 'wb').write(msg_bytes)
+    sig = sh('openssl', 'pkeyutl', '-sign', '-inkey', pem, '-rawin', '-in', msg_f)
+    os.unlink(msg_f)
+    return base64.b64encode(sig).decode()
 
 def req(method, path, obj=None):
     # curl, not urllib: this VM's egress proxy 403s urllib's requests.
@@ -170,6 +187,111 @@ def cmd_refresh():
     open(CERT_FILE, 'w').write(new_cert)
     print(new_cert)
 
+# ---------- guid certs ----------
+def save_guid_cert(cert):
+    os.makedirs(GUID_DIR, mode=0o700, exist_ok=True)
+    fields, _, _ = parse_cert(cert)
+    path = os.path.join(GUID_DIR, f"{fields['serial'][0]}.txt")
+    open(path, 'w').write(cert)
+    return path
+
+def guid_certs():
+    """All held guid certs as (serial:int, path), oldest first."""
+    out = []
+    if os.path.isdir(GUID_DIR):
+        for name in os.listdir(GUID_DIR):
+            if name.endswith('.txt'):
+                try:
+                    out.append((int(name[:-4]), os.path.join(GUID_DIR, name)))
+                except ValueError:
+                    pass
+    return sorted(out)
+
+def my_guid_cert():
+    """The newest held guid cert bound to my own key, or None."""
+    _, my_fp, _ = my_pubkey()
+    best = None
+    for serial, path in guid_certs():
+        fields, _, _ = parse_cert(open(path).read())
+        if fields['key-fingerprint'][0] == my_fp:
+            best = (serial, path)
+    return best
+
+def guid_challenge(serial):
+    code, ch = req('GET', f'/v1/guids/challenge?serial={serial}')
+    assert code == 200, f'guid challenge failed: {code} {ch}'
+    return ch
+
+def cmd_guid_new():
+    cert = open(CERT_FILE).read()
+    fields, _, _ = parse_cert(cert)
+    ch = guid_challenge(fields['serial'][0])
+    sig = sign_with(KEY_PEM, ch['signing_string'].encode())
+    code, obj = req('POST', '/v1/guids',
+                    {'cert': cert, 'nonce': ch['nonce'], 'signature': sig})
+    assert code == 201, f'guid-new failed: {code} {obj}'
+    # The raw GUID arrives exactly once, in this response. Save it like
+    # a key: it is the address every webhook will carry.
+    with open(GUID_FILE, 'w') as f:
+        f.write(obj['guid'] + '\n')
+    os.chmod(GUID_FILE, 0o600)
+    path = save_guid_cert(obj['cert'])
+    ok, msg = verify_cert(obj['cert'])
+    print('guid:', obj['guid'])
+    print('cert:', msg, '->', path)
+    print('guid saved to', GUID_FILE)
+
+def cmd_guid_renew():
+    cert_path = sys.argv[2] if len(sys.argv) > 2 else None
+    key_pem = sys.argv[3] if len(sys.argv) > 3 else KEY_PEM
+    if cert_path is None:
+        found = my_guid_cert()
+        assert found, 'no held guid cert for my key'
+        cert_path = found[1]
+    cert = open(cert_path).read()
+    fields, _, _ = parse_cert(cert)
+    ch = guid_challenge(fields['serial'][0])
+    sig = sign_with(key_pem, ch['signing_string'].encode())
+    code, obj = req('POST', '/v1/guids/renew',
+                    {'cert': cert, 'nonce': ch['nonce'], 'signature': sig})
+    assert code == 201, f'guid-renew failed: {code} {obj}'
+    path = save_guid_cert(obj['cert'])
+    _, want_fp, _ = pubkey_of(key_pem)
+    ok, msg = verify_cert(obj['cert'], check_mine=False)
+    assert ok and parse_cert(obj['cert'])[0]['key-fingerprint'][0] == want_fp, msg
+    print('renewed peer:', msg, '->', path)
+
+def cmd_guid_add():
+    assert len(sys.argv) > 2, 'usage: guid-add <other-private-key.pem>'
+    other_pem = sys.argv[2]
+    new_line, new_fp, _ = pubkey_of(other_pem)
+    found = my_guid_cert()
+    assert found, 'no held guid cert for my key'
+    cert = open(found[1]).read()
+    fields, _, _ = parse_cert(cert)
+    ch = guid_challenge(fields['serial'][0])
+    sig = sign_with(KEY_PEM, ch['signing_string'].encode())
+    code, kch = req('GET', f'/v1/guids/challenge?fp={urllib.parse.quote(new_fp, safe="")}')
+    assert code == 200, f'key challenge failed: {code} {kch}'
+    ksig = sign_with(other_pem, kch['signing_string'].encode())
+    code, obj = req('POST', '/v1/guids/issue',
+                    {'cert': cert, 'nonce': ch['nonce'], 'signature': sig,
+                     'new_key': new_line, 'new_nonce': kch['nonce'],
+                     'new_signature': ksig})
+    assert code == 201, f'guid-add failed: {code} {obj}'
+    path = save_guid_cert(obj['cert'])
+    ok, msg = verify_cert(obj['cert'], check_mine=False)
+    assert ok and parse_cert(obj['cert'])[0]['key-fingerprint'][0] == new_fp, msg
+    print('added peer for', new_fp + ':', msg, '->', path)
+
+def cmd_guid_show():
+    if os.path.exists(GUID_FILE):
+        print('guid:', open(GUID_FILE).read().strip())
+    for serial, path in guid_certs():
+        fields, _, _ = parse_cert(open(path).read())
+        print(f"serial {serial}: fp {fields['key-fingerprint'][0]} "
+              f"hash {fields['guid-hash'][0]} expires {fields['expires'][0]}")
+
 def cmd_verify():
     path = sys.argv[2] if len(sys.argv) > 2 else CERT_FILE
     ok, msg = verify_cert(open(path).read(), check_mine=False)
@@ -182,4 +304,6 @@ if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else 'show'
     {'genkey': cmd_genkey, 'open': cmd_open, 'claim': cmd_claim,
      'await': cmd_await,
-     'refresh': cmd_refresh, 'verify': cmd_verify, 'show': cmd_show}[cmd]()
+     'refresh': cmd_refresh, 'verify': cmd_verify, 'show': cmd_show,
+     'guid-new': cmd_guid_new, 'guid-renew': cmd_guid_renew,
+     'guid-add': cmd_guid_add, 'guid-show': cmd_guid_show}[cmd]()

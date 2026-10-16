@@ -32,6 +32,12 @@ the trust model for each.
 Lifecycle: [LIFECYCLE.md](LIFECYCLE.md) — how a cert is born, lives,
 refreshes, and dies, with every policy parameter in one table.
 
+GUID certs: [GUID.md](GUID.md) — the mint's second cert class. The
+mint generates an unguessable address (a GUID), returns it once, and
+keeps only its hash inside peer certs binding it to keys — a stable,
+provable address with no registry: issue-new from an identity cert,
+renew and issue-another from any live peer.
+
 Design document: [SPEC.md](SPEC.md) — the full spec, including the
 refresh rules (30-day sliding window, 12-month absolute cap from the
 last human authentication), revocation, provider policy notes, and
@@ -45,10 +51,13 @@ login page; the agent reports the result).
   Routes: provider logins (`/auth/meta`, `/auth/slack` + callbacks),
   session API (`POST /v1/sessions`, `GET /v1/sessions/<id>` with
   long-poll `?wait=N`, human page `/s/<id>`), refresh
-  (`GET /v1/refresh/challenge`, `POST /v1/refresh`), `GET /pubkey`,
+  (`GET /v1/refresh/challenge`, `POST /v1/refresh`), guid certs
+  (`GET /v1/guids/challenge`, `POST /v1/guids`,
+  `POST /v1/guids/renew`, `POST /v1/guids/issue`), `GET /pubkey`,
   `GET /revoked`.
 - `cm-client.py` — a reference agent-side client
-  (genkey / open / claim / await / refresh / verify / show). Uses the
+  (genkey / open / claim / await / refresh / verify / show, plus
+  guid-new / guid-renew / guid-add / guid-show). Uses the
   system `openssl` CLI for Ed25519 so it needs no Python crypto libs.
 
 ## Running a mint
@@ -80,4 +89,6 @@ No bot token, signing secret, or Socket Mode is involved.
 Live and tested end to end at certmint.ai with two providers (Meta,
 Slack). Certificates are valid 30 days; refresh slides the window on
 a possession proof without a new login, up to 12 months from the
-last human authentication.
+last human authentication. GUID certs are implemented and covered by
+an end-to-end test suite (issue-new, renew, issue-another, and the
+negative cases).
