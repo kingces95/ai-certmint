@@ -436,28 +436,16 @@ class H(http.server.BaseHTTPRequestHandler):
     # ---------- mint: guid certs ----------
     def _guid_challenge(self, qs):
         serial = (qs.get('serial') or [''])[0]
-        fp = (qs.get('fp') or [''])[0]
+        if not serial.isdigit():
+            self._json(400, {'error': 'serial required'})
+            return
         nonce = secrets.token_urlsafe(32)
         with LOCK:
             st = load_state()
-            if serial:
-                if not serial.isdigit():
-                    self._json(400, {'error': 'serial required'})
-                    return
-                st['challenges'][nonce] = {'kind': 'guid-auth', 'serial': int(serial),
-                                           'expires': ts(now_utc() + datetime.timedelta(seconds=CHALLENGE_TTL_SECS))}
-                save_state(st)
-                self._json(200, {'nonce': nonce, 'signing_string': f'certmint-guid-v1\n{serial}\n{nonce}'})
-            elif fp:
-                if not fp.startswith('SHA256:'):
-                    self._json(400, {'error': 'fp must be a SHA256: fingerprint'})
-                    return
-                st['challenges'][nonce] = {'kind': 'guid-key', 'fp': fp,
-                                           'expires': ts(now_utc() + datetime.timedelta(seconds=CHALLENGE_TTL_SECS))}
-                save_state(st)
-                self._json(200, {'nonce': nonce, 'signing_string': f'certmint-guidkey-v1\n{fp}\n{nonce}'})
-            else:
-                self._json(400, {'error': 'serial or fp required'})
+            st['challenges'][nonce] = {'kind': 'guid-auth', 'serial': int(serial),
+                                       'expires': ts(now_utc() + datetime.timedelta(seconds=CHALLENGE_TTL_SECS))}
+            save_state(st)
+        self._json(200, {'nonce': nonce, 'signing_string': f'certmint-guid-v1\n{serial}\n{nonce}'})
 
     def _take_challenge(self, nonce, kind):
         """Consume a single-use challenge of the expected kind."""
@@ -538,9 +526,9 @@ class H(http.server.BaseHTTPRequestHandler):
         self._json(201, {'cert': cert, 'serial': serial, 'guid': guid_bytes.hex()})
 
     def _guid_authorizer(self, req):
-        """The authorizer path for renew / issue-another: a live guid
-        cert with possession proven. Returns its fields, or None after
-        sending an error."""
+        """The authorizer path for renew: a live guid cert with
+        possession proven. Returns its fields, or None after sending
+        an error."""
         got = self._presented_cert(req.get('cert') or '')
         if got is None:
             return None
@@ -569,41 +557,6 @@ class H(http.server.BaseHTTPRequestHandler):
         with LOCK:
             st = load_state()
             cert, serial = issue_guid_cert(st, fields['key'], fields['guid-hash'],
-                                           parse_ts(fields['authenticated']))
-            save_state(st)
-        self._json(201, {'cert': cert, 'serial': serial})
-
-    def _guid_issue(self):
-        """Issue another: bind the same guid-hash to a NEW key. The
-        caller must prove possession of BOTH the authorizing cert's key
-        and the new key — the mint never signs a binding to a key the
-        caller has not just proven they hold."""
-        req = self._body_json()
-        fields = self._guid_authorizer(req)
-        if fields is None:
-            return
-        new_key = (req.get('new_key') or '').strip()
-        try:
-            blob, raw = parse_openssh_key(new_key)
-        except Exception:
-            self._json(400, {'error': 'new_key must be an ssh-ed25519 public key line'})
-            return
-        new_fp = fingerprint_of_blob(blob)
-        if new_fp == fields['key-fingerprint']:
-            self._json(400, {'error': 'new key is the authorizing key — use renew'})
-            return
-        ch = self._take_challenge(req.get('new_nonce') or '', 'guid-key')
-        if not ch or ch.get('fp') != new_fp:
-            self._json(400, {'error': 'unknown or expired key challenge'})
-            return
-        if not self._prove_possession(new_key,
-                                      f"certmint-guidkey-v1\n{new_fp}\n{req.get('new_nonce')}",
-                                      req.get('new_signature') or ''):
-            self._json(403, {'error': 'new-key possession proof does not verify'})
-            return
-        with LOCK:
-            st = load_state()
-            cert, serial = issue_guid_cert(st, new_key, fields['guid-hash'],
                                            parse_ts(fields['authenticated']))
             save_state(st)
         self._json(201, {'cert': cert, 'serial': serial})
@@ -864,9 +817,6 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         if path == '/v1/guids/renew':
             self._guid_renew()
-            return
-        if path == '/v1/guids/issue':
-            self._guid_issue()
             return
         self._send(404, b'not found\n', 'text/plain')
 

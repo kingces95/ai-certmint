@@ -56,11 +56,11 @@ deliberately different social rules:
   live identity cert with a possession proof — no new human login.
   The mint generates the GUID; `authenticated:` is copied from the
   authorizing identity cert.
-- **Peers, never a chain.** Renewal and issue-another mint
-  *additional* certs for the same `guid-hash:`; nothing is
-  superseded, and no predecessor relationship is recorded. The
-  identity refresh rule "supersedes but does not kill" becomes, for
-  guid certs, "accumulates, and every peer is equal".
+- **Peers, never a chain.** Renewal mints *additional* certs for
+  the same `guid-hash:` and the same key; nothing is superseded,
+  and no predecessor relationship is recorded. The identity refresh
+  rule "supersedes but does not kill" becomes, for guid certs,
+  "accumulates, and every peer is equal".
 - **No auth cap on guid operations.** A live peer authorizes; the
   only wall is each peer's own 30-day expiry. The peer set traces
   back to an identity cert whose 365-day cap governed its own life.

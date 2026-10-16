@@ -11,7 +11,6 @@ Usage:
   cm-client.py guid-new          # birth a GUID, authorized by the held identity cert
   cm-client.py guid-renew [cert] [key]
                                  # mint a peer of a held guid cert (same key)
-  cm-client.py guid-add <key>    # bind the GUID to another key you hold
   cm-client.py guid-show         # print the GUID and its peer certs
 """
 import base64, hashlib, json, os, struct, subprocess, sys, time, urllib.parse, urllib.request
@@ -261,29 +260,6 @@ def cmd_guid_renew():
     assert ok and parse_cert(obj['cert'])[0]['key-fingerprint'][0] == want_fp, msg
     print('renewed peer:', msg, '->', path)
 
-def cmd_guid_add():
-    assert len(sys.argv) > 2, 'usage: guid-add <other-private-key.pem>'
-    other_pem = sys.argv[2]
-    new_line, new_fp, _ = pubkey_of(other_pem)
-    found = my_guid_cert()
-    assert found, 'no held guid cert for my key'
-    cert = open(found[1]).read()
-    fields, _, _ = parse_cert(cert)
-    ch = guid_challenge(fields['serial'][0])
-    sig = sign_with(KEY_PEM, ch['signing_string'].encode())
-    code, kch = req('GET', f'/v1/guids/challenge?fp={urllib.parse.quote(new_fp, safe="")}')
-    assert code == 200, f'key challenge failed: {code} {kch}'
-    ksig = sign_with(other_pem, kch['signing_string'].encode())
-    code, obj = req('POST', '/v1/guids/issue',
-                    {'cert': cert, 'nonce': ch['nonce'], 'signature': sig,
-                     'new_key': new_line, 'new_nonce': kch['nonce'],
-                     'new_signature': ksig})
-    assert code == 201, f'guid-add failed: {code} {obj}'
-    path = save_guid_cert(obj['cert'])
-    ok, msg = verify_cert(obj['cert'], check_mine=False)
-    assert ok and parse_cert(obj['cert'])[0]['key-fingerprint'][0] == new_fp, msg
-    print('added peer for', new_fp + ':', msg, '->', path)
-
 def cmd_guid_show():
     if os.path.exists(GUID_FILE):
         print('guid:', open(GUID_FILE).read().strip())
@@ -306,4 +282,4 @@ if __name__ == '__main__':
      'await': cmd_await,
      'refresh': cmd_refresh, 'verify': cmd_verify, 'show': cmd_show,
      'guid-new': cmd_guid_new, 'guid-renew': cmd_guid_renew,
-     'guid-add': cmd_guid_add, 'guid-show': cmd_guid_show}[cmd]()
+     'guid-show': cmd_guid_show}[cmd]()

@@ -26,12 +26,17 @@ registry anywhere**. The association function has a working name,
   knocks for a GUID are delivered only to the holder who proved
   possession of a live guid cert for it.
 - **Certs are peers, not a chain.** Any number of guid certs may bind
-  the same `guid-hash:` — to the same key or to different keys.
-  Issuing one never supersedes or revokes another. Staggered expiry
-  across peers is the resilience mechanism: the GUID is stranded only
-  if **every** peer lapses (expires or is revoked) at once. Recovery
-  after stranding is a fresh issue-new — and reconfiguring every
-  webhook that carried the old GUID.
+  the same `guid-hash:` to the **same key**. Issuing one never
+  supersedes or revokes another. Staggered expiry across peers is
+  the resilience mechanism: the GUID is stranded only if **every**
+  peer lapses (expires or is revoked) at once — or the key itself is
+  lost. Recovery after stranding is a fresh issue-new — and
+  reconfiguring every webhook that carried the old GUID.
+- **One key per GUID.** An earlier design let a guid cert bind the
+  hash to *additional* keys (issue-another). It was dropped
+  (2026-10-15): consumers such as knockwire authenticate with the
+  one guid cert, and extra key edges were surface without a need.
+  A GUID's key is fixed at issue-new for the GUID's whole life.
 
 ## The cert
 
@@ -54,7 +59,7 @@ signature: <mint Ed25519 signature over all lines above>
 authentication at the root of the peer set, exactly as refresh does
 for identity certs.
 
-## The three operations
+## The two operations
 
 Every operation is gated on a single-use challenge (300s life) and a
 possession proof. Challenges are kind-bound: a refresh challenge
@@ -64,10 +69,10 @@ cannot authorize a guid operation, and vice versa.
 |---|---|---|
 | **Issue new** — `POST /v1/guids` | A live **identity cert** | The mint generates a fresh GUID and mints the first peer: `guid-hash:` → the identity cert's key. Response `201 {cert, serial, guid}` — the only place the raw GUID ever appears |
 | **Renew** — `POST /v1/guids/renew` | A live **guid cert** | Mints another peer: same hash, same key, new serial, fresh 30-day expiry |
-| **Issue another** — `POST /v1/guids/issue` | A live **guid cert**, plus a new key | Mints a peer binding the same hash to the new key. The caller must prove possession of **both** keys — the authorizing cert's and the new one (a second challenge bound to the new fingerprint) |
 
-The invariant across all three: **the mint never signs a binding to
-a fingerprint the caller has not just proven they hold.**
+The invariant across both: **the mint never signs a guid cert
+except on a possession proof of the authorizing cert's key** — and
+the key a GUID is bound to never changes.
 
 ## Verification
 

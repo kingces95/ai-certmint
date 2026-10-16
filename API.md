@@ -21,10 +21,8 @@ provider-side token verification.
 | `GET /v1/refresh/challenge?serial=N` | `200 {nonce, signing_string}`. The nonce is single-use with a 300s life |
 | `POST /v1/refresh` | In: `{cert, nonce, signature}` → `200 {cert, serial}`. Rejects, in order: unparseable cert → bad mint signature → unknown/replayed/expired challenge (`400`); revoked serial → expired cert → authentication older than 365 days → possession proof fails (`403`). Identity lines and `authenticated:` are copied verbatim; only the validity window slides |
 | `GET /v1/guids/challenge?serial=N` | `200 {nonce, signing_string}` for a guid operation authorized by cert serial N. Kind-bound (`guid-auth`): a refresh challenge cannot be spent here, nor this one at refresh |
-| `GET /v1/guids/challenge?fp=SHA256:…` | `200 {nonce, signing_string}` binding a possession proof to a *new key's* fingerprint (`guid-key`), for issue-another |
 | `POST /v1/guids` | **Issue new.** In: `{cert, nonce, signature}` where cert is a live identity cert → `201 {cert, serial, guid}`. The mint generates the GUID; the raw value appears only in this response and is never stored or logged. `400` when the authorizer is a guid cert or lacks identity lines; `403` on revoked/expired authorizer or a failed possession proof |
-| `POST /v1/guids/renew` | **Renew.** In: `{cert, nonce, signature}` where cert is a live guid cert → `201 {cert, serial}`: a new peer, same `guid-hash:`, same key. `400` when the authorizer is an identity cert |
-| `POST /v1/guids/issue` | **Issue another.** In: `{cert, nonce, signature, new_key, new_nonce, new_signature}` → `201 {cert, serial}` binding the same `guid-hash:` to `new_key`. Possession of *both* keys is proven (authorizer challenge + the `fp` key challenge). `400` when `new_key` is the authorizing key (that is a renew) |
+| `POST /v1/guids/renew` | **Renew.** In: `{cert, nonce, signature}` where cert is a live guid cert → `201 {cert, serial}`: a new peer, same `guid-hash:`, same key. `400` when the authorizer is an identity cert. There is no operation that binds a GUID to a different key — a GUID's key is fixed at issue-new |
 
 ## Human browser plane — HTML + cookies
 
