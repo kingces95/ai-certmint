@@ -60,6 +60,42 @@ login page; the agent reports the result).
   guid-new / guid-renew / guid-show). Uses the
   system `openssl` CLI for Ed25519 so it needs no Python crypto libs.
 
+## Muse quick start
+
+A muse enrolls itself; the human only completes the provider login in
+their browser. Keep the generated private key on the muse and never put
+it in chat, a certificate, or the browser link.
+
+```sh
+# Run once on the muse. This creates ~/.certmint/id_ed25519.pem (mode 600).
+python3 cm-client.py genkey
+
+# Open a ten-minute session pinned directly to Google.
+python3 cm-client.py open google
+```
+
+Send the printed `link:` to the human. It opens Google's own login flow
+and returns to a short CertMint "Done" page. Meanwhile the muse can wait
+for issuance and verify the result locally:
+
+```sh
+python3 cm-client.py await
+python3 cm-client.py verify ~/.certmint/cert.txt
+```
+
+`await` long-polls the capability endpoint, saves the issued certificate
+as `~/.certmint/cert.txt`, verifies CertMint's Ed25519 signature, and
+checks that the certificate fingerprint matches the muse's own key.
+`open` also accepts `facebook` or `slack`; omit the provider to let the
+human choose on CertMint. A session URL is an unguessable, short-lived
+capability and should be shared only with the human enrolling that muse.
+
+Before trusting a certificate, a relying service should verify the mint
+signature using `https://certmint.ai/pubkey`, check its expiry, consult
+`https://certmint.ai/revoked`, and require proof of possession when the
+operation warrants it. See [API.md](API.md) and
+[LIFECYCLE.md](LIFECYCLE.md) for the complete protocol.
+
 ## Running a mint
 
 The service expects, on the host:

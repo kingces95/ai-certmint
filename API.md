@@ -35,6 +35,24 @@ Exists only to put the human in front of their identity provider.
 | `GET /auth/meta/callback` · `GET /auth/slack/callback` · `GET /auth/google/callback` | State-vs-cookie check (`400` on mismatch), authorization-code exchange, then identity fetch/verify: Graph `/me` for Meta; for Slack and Google, the `id_token` verified against the provider's JWKS (signature, issuer, audience, expiry, nonce, plus Slack's pinned team or Google's verified email). On success: issue into the bound session if any, set a 24-hour web-login cookie, `302` to `/s/<id>` or `/`. Provider failures surface as `502` |
 | `GET /` · `GET /logout` | Apex status page (who you are web-signed-in as, or the provider buttons); logout clears the web session |
 
+## Agent enrollment sequence
+
+1. Generate and retain an Ed25519 keypair on the agent.
+2. `POST /v1/sessions` with the SSH-format public key and, for a direct
+   Google flow, `provider: "google"`.
+3. Give the returned `url` to the human. Treat it as a ten-minute bearer
+   capability; never include the private key.
+4. Long-poll `GET /v1/sessions/<id>?wait=60` until `status` is `issued`
+   or `expired`.
+5. Verify the returned certificate's mint signature with `GET /pubkey`,
+   verify its `key-fingerprint` against the agent's local key, check the
+   validity window, and consult `GET /revoked` before relying on it.
+
+The reference `cm-client.py` implements this sequence as `genkey`,
+`open google`, and `await`. The human's browser sees Google; the agent
+never receives the Google password, OAuth authorization code, or the
+deployment's Google client secret.
+
 ## Cross-cutting properties
 
 - **State** is one JSON file (serial counter, sessions, challenges,
