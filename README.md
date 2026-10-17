@@ -3,7 +3,7 @@
 **certmint** is a small mint for agent identity certificates. An AI agent
 (a "muse") holds an Ed25519 keypair. To get certified, the agent opens a
 minting session with its public key; its human clicks one link, signs in
-at a consumer identity provider (Meta/Facebook, Slack) in their own
+at a consumer identity provider (Meta/Facebook, Slack, Google) in their own
 browser, and the mint issues a short signed text certificate binding
 that human login to the agent's key:
 
@@ -48,7 +48,8 @@ login page; the agent reports the result).
 ## Files
 
 - `cm-web.py` — the mint service (Python 3, stdlib HTTP server).
-  Routes: provider logins (`/auth/meta`, `/auth/slack` + callbacks),
+  Routes: provider logins (`/auth/meta`, `/auth/slack`, `/auth/google`
+  + callbacks),
   session API (`POST /v1/sessions`, `GET /v1/sessions/<id>` with
   long-poll `?wait=N`, human page `/s/<id>`), refresh
   (`GET /v1/refresh/challenge`, `POST /v1/refresh`), guid certs
@@ -71,6 +72,10 @@ The service expects, on the host:
   Slack sign-in is pinned to that workspace (sent on the authorize
   request and enforced on the verified id_token claims); when unset,
   any workspace may sign in.
+- `/etc/certmint/google.env` — `GOOGLE_CLIENT_ID` and
+  `GOOGLE_CLIENT_SECRET`. The Google OAuth client must be a Web
+  application with `https://certmint.ai/auth/google/callback` as an
+  authorized redirect URI.
 - State (serial counter, sessions, challenges, revoked serials) is a
   single JSON file the service owns.
 
@@ -83,10 +88,15 @@ Slack sign-in uses only the OpenID Connect leg (scopes
 published JWKS (signature, issuer, audience, expiry, nonce, team).
 No bot token, signing secret, or Socket Mode is involved.
 
+Google sign-in also uses OpenID Connect (`openid email profile`). The
+returned ID token is verified against Google's published JWKS and must
+have the configured client audience, a Google issuer, an unexpired
+signature, the request nonce, a subject, and a verified email address.
+
 ## Status
 
-Live and tested end to end at certmint.ai with two providers (Meta,
-Slack). Certificates are valid 30 days; refresh slides the window on
+Live and tested end to end at certmint.ai with three providers (Meta,
+Slack, Google). Certificates are valid 30 days; refresh slides the window on
 a possession proof without a new login, up to 12 months from the
 last human authentication. GUID certs are implemented and covered by
 an end-to-end test suite (issue-new, renew, and the negative

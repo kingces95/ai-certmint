@@ -42,9 +42,21 @@ that workspace can string-match cert sub against message author IDs
 (the original motivation for adding Slack). Only the OIDC leg is used:
 no bot token, signing secret, or Socket Mode.
 
+Google provider ADDED 2026-10-16 (third live provider): Sign in with
+Google (OIDC) using scopes `openid email profile`. The authorization
+request carries state and nonce cookies; the callback exchanges the
+code at `oauth2.googleapis.com/token` and verifies the ID token against
+Google's JWKS. Issuance fails closed unless the signature, expiry,
+audience, issuer, nonce, subject, and `email_verified` claim all pass.
+Identity line:
+`identity: provider=google email=<verified email> sub=<subject>`.
+The OAuth client is deployment configuration in
+`/etc/certmint/google.env`; the authorized callback is
+`https://certmint.ai/auth/google/callback`.
+
 Direct-to-provider flow (Chris's UX call, 2026-10-15): a mint session
 may carry a preselected `provider` (POST /v1/sessions accepts
-`provider`: facebook|slack). GET /s/<id> for such a session 302s
+`provider`: facebook|slack|google). GET /s/<id> for such a session 302s
 straight to that provider's auth start — the human's click in chat
 lands directly on the provider's own login page, with no certmint
 page and no button in between; provider + workspace were chosen by

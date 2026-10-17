@@ -4,19 +4,23 @@ from http.cookies import SimpleCookie
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
 
-CONFIG_PATH = '/etc/certmint/meta.env'
-SLACK_CONFIG_PATH = '/etc/certmint/slack.env'
-MINT_KEY_PATH = '/etc/certmint/mint-ed25519.pem'
-STATE_PATH = '/var/lib/certmint/state.json'
+CONFIG_PATH = os.environ.get('CERTMINT_META_CONFIG', '/etc/certmint/meta.env')
+SLACK_CONFIG_PATH = os.environ.get('CERTMINT_SLACK_CONFIG', '/etc/certmint/slack.env')
+GOOGLE_CONFIG_PATH = os.environ.get('CERTMINT_GOOGLE_CONFIG', '/etc/certmint/google.env')
+MINT_KEY_PATH = os.environ.get('CERTMINT_MINT_KEY', '/etc/certmint/mint-ed25519.pem')
+STATE_PATH = os.environ.get('CERTMINT_STATE', '/var/lib/certmint/state.json')
 GRAPH_VERSION = 'v23.0'
 REDIRECT_URI = 'https://certmint.ai/auth/meta/callback'
 SLACK_REDIRECT_URI = 'https://certmint.ai/auth/slack/callback'
+GOOGLE_REDIRECT_URI = 'https://certmint.ai/auth/google/callback'
 # The pinned Slack workspace (team id) lives in the deployment's
 # slack.env as SLACK_TEAM_ID — site values are config, never literals.
 # When set, it is sent on every authorize request and enforced on the
 # returned id_token claims; when unset, any workspace may sign in.
 SLACK_ISSUER = 'https://slack.com'
 SLACK_JWKS_URL = 'https://slack.com/openid/connect/keys'
+GOOGLE_ISSUERS = ('accounts.google.com', 'https://accounts.google.com')
+GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs'
 ISSUER = 'certmint.ai'
 CERT_TTL_DAYS = 30
 AUTH_CAP_DAYS = 365
@@ -52,6 +56,9 @@ def load_config():
 def load_slack_config():
     return load_env_file(SLACK_CONFIG_PATH)
 
+def load_google_config():
+    return load_env_file(GOOGLE_CONFIG_PATH)
+
 # ---------- slack oidc ----------
 SLACK_JWK_CLIENT = None
 
@@ -72,6 +79,31 @@ def slack_verify_id_token(id_token, client_id, nonce, pinned_team=''):
         raise ValueError('nonce mismatch')
     if pinned_team and claims.get('https://slack.com/team_id') != pinned_team:
         raise ValueError('unexpected team')
+    return claims
+
+# ---------- google oidc ----------
+GOOGLE_JWK_CLIENT = None
+
+def google_verify_id_token(id_token, client_id, nonce):
+    """Verify a Google OpenID Connect id_token and return its claims.
+    The signature, audience, expiry, issuer, nonce, subject, and verified
+    email are all required. Signing keys are cached and refreshed by
+    PyJWKClient when Google rotates to an unknown kid."""
+    import jwt
+    global GOOGLE_JWK_CLIENT
+    if GOOGLE_JWK_CLIENT is None:
+        GOOGLE_JWK_CLIENT = jwt.PyJWKClient(GOOGLE_JWKS_URL)
+    signing_key = GOOGLE_JWK_CLIENT.get_signing_key_from_jwt(id_token)
+    claims = jwt.decode(id_token, signing_key.key, algorithms=['RS256'],
+                        audience=client_id)
+    if claims.get('iss') not in GOOGLE_ISSUERS:
+        raise ValueError('unexpected issuer')
+    if claims.get('nonce') != nonce:
+        raise ValueError('nonce mismatch')
+    if not claims.get('sub'):
+        raise ValueError('missing subject')
+    if claims.get('email_verified') is not True or not claims.get('email'):
+        raise ValueError('email is not verified')
     return claims
 
 # ---------- keys ----------
@@ -122,7 +154,7 @@ def save_state(st):
         json.dump(st, f)
     os.replace(tmp, STATE_PATH)
 
-SESSIONS_WEB = {}  # web login sessions: token -> {'id','name'} (Meta) or {'provider':'slack','team','sub','name','email'}
+SESSIONS_WEB = {}  # web login sessions: token -> verified provider identity
 
 # ---------- certs ----------
 def issue_cert(st, key_line, name, identity_lines, authenticated_dt):
@@ -271,8 +303,8 @@ class H(http.server.BaseHTTPRequestHandler):
         req = self._body_json()
         key_line = (req.get('key') or '').strip()
         provider = (req.get('provider') or '').strip()
-        if provider and provider not in ('facebook', 'slack'):
-            self._json(400, {'error': 'provider must be facebook or slack'})
+        if provider and provider not in ('facebook', 'slack', 'google'):
+            self._json(400, {'error': 'provider must be facebook, slack, or google'})
             return
         try:
             blob, raw = parse_openssh_key(key_line)
@@ -353,17 +385,21 @@ class H(http.server.BaseHTTPRequestHandler):
         # straight to the provider's own login page.
         provider = s.get('provider')
         if provider:
-            auth_path = {'facebook': '/auth/meta', 'slack': '/auth/slack'}[provider]
+            auth_path = {'facebook': '/auth/meta', 'slack': '/auth/slack',
+                         'google': '/auth/google'}[provider]
             self._redirect(f'{auth_path}?s={sid}')
             return
         slack_btn = ''
         if load_slack_config().get('SLACK_CLIENT_ID'):
             slack_btn = f'\n<p><a class="btn" href="/auth/slack?s={sid}">Continue with Slack</a></p>'
+        google_btn = ''
+        if load_google_config().get('GOOGLE_CLIENT_ID'):
+            google_btn = f'\n<p><a class="btn" href="/auth/google?s={sid}">Continue with Google</a></p>'
         inner = f"""<h1>certmint</h1>
 <p>Your agent asked to certify this public key:</p>
 <p><code class="fp">{s['fingerprint']}</code></p>
 <p>Sign in to certify that this key belongs to you.</p>
-<p><a class="btn" href="/auth/meta?s={sid}">Continue with Meta</a></p>{slack_btn}"""
+<p><a class="btn" href="/auth/meta?s={sid}">Continue with Meta</a></p>{slack_btn}{google_btn}"""
         self._send(200, page('certmint', inner))
 
     # ---------- mint: refresh ----------
@@ -606,6 +642,13 @@ class H(http.server.BaseHTTPRequestHandler):
 {name_line}
 {email_line}
 <p><a href="/logout">Sign out</a></p>"""
+                elif user.get('provider') == 'google':
+                    inner = f"""<h1>certmint</h1>
+<p>You are signed in with Google.</p>
+<p>Your Google ID: <code>{user.get('sub', '')}</code></p>
+{name_line}
+<p>email: <code>{user.get('email', '')}</code></p>
+<p><a href="/logout">Sign out</a></p>"""
                 else:
                     inner = f"""<h1>certmint</h1>
 <p>You are signed in with Meta.</p>
@@ -619,6 +662,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     buttons.append('<p><a class="btn" href="/auth/meta">Continue with Meta</a></p>')
                 if load_slack_config().get('SLACK_CLIENT_ID'):
                     buttons.append('<p><a class="btn" href="/auth/slack">Continue with Slack</a></p>')
+                if load_google_config().get('GOOGLE_CLIENT_ID'):
+                    buttons.append('<p><a class="btn" href="/auth/google">Continue with Google</a></p>')
                 if buttons:
                     inner = '<h1>certmint</h1>\n<p>Sign in to continue.</p>\n' + '\n'.join(buttons)
                 else:
@@ -793,6 +838,92 @@ class H(http.server.BaseHTTPRequestHandler):
             self._redirect(target, [('Set-Cookie', cookie), ('Set-Cookie', clear_state), ('Set-Cookie', clear_nonce)])
             return
 
+        if path == '/auth/google':
+            gcfg = load_google_config()
+            google_client_id = gcfg.get('GOOGLE_CLIENT_ID', '')
+            if not google_client_id:
+                self._send(503, page('certmint', '<h1>certmint</h1><p>Google login is not configured yet.</p>'))
+                return
+            state = secrets.token_urlsafe(24)
+            nonce = secrets.token_urlsafe(24)
+            mint_sid = (qs.get('s') or [''])[0]
+            if mint_sid:
+                with LOCK:
+                    st = load_state()
+                    s = st['sessions'].get(mint_sid)
+                    if s and s['status'] == 'pending':
+                        s['oauth_state'] = state
+                        s['oauth_nonce'] = nonce
+                        save_state(st)
+            params = urllib.parse.urlencode({
+                'client_id': google_client_id,
+                'scope': 'openid email profile',
+                'response_type': 'code',
+                'redirect_uri': GOOGLE_REDIRECT_URI,
+                'state': state,
+                'nonce': nonce,
+            })
+            extra = [('Set-Cookie', f'cm_state={state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600'),
+                     ('Set-Cookie', f'cm_nonce={nonce}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600')]
+            self._redirect(f'https://accounts.google.com/o/oauth2/v2/auth?{params}', extra)
+            return
+
+        if path == '/auth/google/callback':
+            gcfg = load_google_config()
+            google_client_id = gcfg.get('GOOGLE_CLIENT_ID', '')
+            google_client_secret = gcfg.get('GOOGLE_CLIENT_SECRET', '')
+            if 'error' in qs:
+                self._send(400, page('certmint', f"<h1>certmint</h1><p>Google login was declined or failed: {qs['error'][0]}</p><p><a href=\"/\">Back</a></p>"))
+                return
+            code = (qs.get('code') or [''])[0]
+            state = (qs.get('state') or [''])[0]
+            nonce_cookie = self._cookies().get('cm_nonce', '')
+            if not code or not state or state != self._cookies().get('cm_state'):
+                self._send(400, page('certmint', '<h1>certmint</h1><p>Invalid login callback (state check failed).</p><p><a href="/">Back</a></p>'))
+                return
+            try:
+                token_body = urllib.parse.urlencode({
+                    'client_id': google_client_id,
+                    'client_secret': google_client_secret,
+                    'code': code,
+                    'redirect_uri': GOOGLE_REDIRECT_URI,
+                    'grant_type': 'authorization_code',
+                }).encode()
+                treq = urllib.request.Request('https://oauth2.googleapis.com/token',
+                                              data=token_body,
+                                              headers={'Content-Type': 'application/x-www-form-urlencoded'})
+                with urllib.request.urlopen(treq, timeout=15) as r:
+                    tok_resp = json.load(r)
+                claims = google_verify_id_token(tok_resp['id_token'], google_client_id, nonce_cookie)
+            except Exception as e:
+                self._send(502, page('certmint', f'<h1>certmint</h1><p>Could not complete Google login: {type(e).__name__}</p><p><a href="/">Back</a></p>'))
+                return
+            sub = claims['sub']
+            name = claims.get('name')
+            email = claims['email']
+            tok = secrets.token_urlsafe(32)
+            SESSIONS_WEB[tok] = {'provider': 'google', 'sub': sub, 'name': name, 'email': email}
+            cookie = f'cm_session={tok}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400'
+            clear_state = 'cm_state=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0'
+            clear_nonce = 'cm_nonce=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0'
+            target = '/'
+            with LOCK:
+                st = load_state()
+                for sid, s in st['sessions'].items():
+                    if s.get('oauth_state') == state and s['status'] == 'pending':
+                        identity = f'identity: provider=google email={email} sub={sub}'
+                        cert, serial = issue_cert(st, s['key'], name, [identity], now_utc())
+                        s['status'] = 'issued'
+                        s['cert'] = cert
+                        s['serial'] = serial
+                        s.pop('oauth_state', None)
+                        s.pop('oauth_nonce', None)
+                        save_state(st)
+                        target = f'/s/{sid}'
+                        break
+            self._redirect(target, [('Set-Cookie', cookie), ('Set-Cookie', clear_state), ('Set-Cookie', clear_nonce)])
+            return
+
         if path == '/logout':
             tok = self._cookies().get('cm_session')
             if tok:
@@ -822,4 +953,5 @@ class H(http.server.BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
-http.server.ThreadingHTTPServer(('127.0.0.1', 18080), H).serve_forever()
+if __name__ == '__main__':
+    http.server.ThreadingHTTPServer(('127.0.0.1', 18080), H).serve_forever()
